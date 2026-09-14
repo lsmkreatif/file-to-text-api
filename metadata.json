@@ -1,0 +1,6 @@
+{
+  "name": "File to Text API",
+  "description": "API for extracting text from PDF, DOCX, and image files",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
