@@ -14,11 +14,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Multer in-memory storage for handling file uploads
+// Multer in-memory storage for handling file uploads (max 50MB)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB max file size
+    fileSize: 50 * 1024 * 1024,
   },
 });
 
@@ -38,20 +38,12 @@ async function extractTextImage(buffer: Buffer): Promise<string> {
   return result.data.text || '';
 }
 
-// Health check endpoint
-app.get('/health', (_req: Request, res: Response) => {
-  res.json({
-    status: 'ok',
-    service: 'file-to-text-api',
-    supportedFormats: ['.pdf', '.docx', '.png', '.jpg', '.jpeg'],
-    uptime: process.uptime(),
-  });
-});
-
-// Main extraction endpoint matching the original FastAPI interface
-app.post('/extract-text', upload.single('file') as any, async (req: Request, res: Response) => {
+// Handler for file text extraction
+async function handleExtractText(req: Request, res: Response) {
   if (!req.file) {
-    return res.status(400).json({ error: "Missing file. Please upload a file with field name 'file'" });
+    return res.status(400).json({
+      error: "Missing file. Please upload a file with form-data field name 'file'",
+    });
   }
 
   const filename = req.file.originalname;
@@ -71,25 +63,135 @@ app.post('/extract-text', upload.single('file') as any, async (req: Request, res
     ) {
       text = await extractTextImage(buffer);
     } else {
-      return res.status(400).json({ error: 'Unsupported file type' });
+      return res.status(400).json({
+        error: `Unsupported file type for '${filename}'. Supported formats: .pdf, .docx, .png, .jpg, .jpeg`,
+      });
     }
 
     return res.json({ filename, text });
   } catch (err: any) {
     console.error('Extraction error:', err);
-    return res.status(500).json({ error: err.message || String(err) });
+    return res.status(500).json({
+      error: err.message || 'Error occurred while extracting text from file',
+    });
   }
+}
+
+// Health check endpoint
+app.get('/health', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    service: 'file-to-text-api',
+    supportedFormats: ['.pdf', '.docx', '.png', '.jpg', '.jpeg'],
+    uptime: process.uptime(),
+  });
 });
 
-// Interactive API UI and Documentation served at root / and /docs
-app.get(['/', '/docs'], (_req: Request, res: Response) => {
+// OpenAPI specification endpoint (FastAPI compatibility)
+app.get('/openapi.json', (_req: Request, res: Response) => {
+  res.json({
+    openapi: '3.0.2',
+    info: {
+      title: 'File to Text API',
+      description: 'API for extracting text from PDF, DOCX, and image files',
+      version: '1.0.0',
+    },
+    paths: {
+      '/extract-text': {
+        post: {
+          summary: 'Extract Text From File',
+          description: 'Upload a PDF, DOCX, PNG, JPG, or JPEG file to extract text content.',
+          requestBody: {
+            content: {
+              'multipart/form-data': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    file: {
+                      type: 'string',
+                      format: 'binary',
+                      description: 'File to extract text from',
+                    },
+                  },
+                  required: ['file'],
+                },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'Successful Response',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      filename: { type: 'string' },
+                      text: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+            '400': { description: 'Bad Request / Unsupported file type' },
+            '500': { description: 'Extraction error' },
+          },
+        },
+      },
+      '/health': {
+        get: {
+          summary: 'Health Check',
+          responses: {
+            '200': { description: 'Service is healthy' },
+          },
+        },
+      },
+    },
+  });
+});
+
+// Extraction endpoints with multiple aliases for client compatibility
+const extractionRoutes = [
+  '/extract-text',
+  '/extract_text',
+  '/extract',
+  '/api/extract-text',
+  '/api/extract',
+  '/',
+];
+app.post(extractionRoutes, upload.single('file') as any, handleExtractText);
+
+// Interactive UI and Root route (supports JSON content negotiation)
+app.get(['/', '/docs'], (req: Request, res: Response) => {
+  // If request explicitly asks for JSON, return JSON metadata
+  const acceptsJson =
+    req.query.format === 'json' ||
+    (req.headers.accept &&
+      req.headers.accept.includes('application/json') &&
+      !req.headers.accept.includes('text/html'));
+
+  if (acceptsJson) {
+    return res.json({
+      name: 'File to Text API',
+      description: 'API for extracting text from PDF, DOCX, and image files',
+      status: 'online',
+      endpoints: {
+        extractText: 'POST /extract-text (multipart/form-data with field "file")',
+        health: 'GET /health',
+        openapi: 'GET /openapi.json',
+        docs: 'GET /docs',
+      },
+      supportedFormats: ['.pdf', '.docx', '.png', '.jpg', '.jpeg'],
+    });
+  }
+
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>File to Text API</title>
-  <meta name="description" content="FastAPI to Express migration for extracting text from PDF, DOCX, and image files">
+  <meta name="description" content="API for extracting text from PDF, DOCX, and image files">
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -118,6 +220,9 @@ app.get(['/', '/docs'], (_req: Request, res: Response) => {
         <div class="flex items-center gap-2">
           <a href="/health" target="_blank" class="text-xs px-3 py-1.5 font-medium rounded-md bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 transition">
             GET /health
+          </a>
+          <a href="/openapi.json" target="_blank" class="text-xs px-3 py-1.5 font-medium rounded-md bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 transition">
+            OpenAPI Spec
           </a>
           <span class="text-xs px-3 py-1.5 font-medium rounded-md bg-slate-900 text-white">
             POST /extract-text
@@ -178,7 +283,7 @@ app.get(['/', '/docs'], (_req: Request, res: Response) => {
 
         <!-- Status & Result Area -->
         <div id="statusContainer" class="hidden mt-6 pt-5 border-t border-slate-200">
-          <div id="errorMessage" class="hidden p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs mb-4"></div>
+          <div id="errorMessage" class="hidden p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs mb-4 leading-relaxed"></div>
 
           <div id="resultBox" class="hidden">
             <div class="flex items-center justify-between mb-2">
@@ -361,9 +466,32 @@ app.get(['/', '/docs'], (_req: Request, res: Response) => {
           body: formData,
         });
 
-        const data = await res.json();
+        // Safely parse JSON or handle server error HTML
+        const contentType = res.headers.get('content-type') || '';
+        let data = null;
+
+        if (contentType.includes('application/json')) {
+          try {
+            data = await res.json();
+          } catch (jsonErr) {
+            // In case of truncated JSON
+            data = null;
+          }
+        }
+
         if (!res.ok) {
-          throw new Error(data.error || 'Failed to extract text (' + res.status + ')');
+          if (data && data.error) {
+            throw new Error(data.error);
+          }
+          const text = await res.text();
+          if (text.toLowerCase().includes('<!doctype') || text.toLowerCase().includes('<html')) {
+            throw new Error('Server is still initializing or proxy is unavailable (' + res.status + '). Please try again in a few moments.');
+          }
+          throw new Error('Server responded with status ' + res.status + ': ' + (text || res.statusText));
+        }
+
+        if (!data) {
+          throw new Error('Server returned an unexpected response format.');
         }
 
         const textContent = data.text || '';
@@ -396,10 +524,28 @@ app.get(['/', '/docs'], (_req: Request, res: Response) => {
   res.send(html);
 });
 
-// Error handling middleware
+// Universal 404 handler returning JSON (prevents unexpected HTML for API clients)
+app.use((req: Request, res: Response) => {
+  res.status(404).json({
+    error: `Cannot ${req.method} ${req.path}`,
+    message: 'Endpoint not found. Use POST /extract-text to upload files.',
+    availableEndpoints: [
+      'POST /extract-text',
+      'GET /health',
+      'GET /openapi.json',
+      'GET /docs',
+    ],
+  });
+});
+
+// Global error handling middleware returning JSON
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   console.error('Unhandled server error:', err);
-  res.status(500).json({ error: err.message || 'Internal server error' });
+  const status = err.status || (err.name === 'MulterError' ? 400 : 500);
+  res.status(status).json({
+    error: err.message || 'Internal server error',
+    type: err.name || 'ServerError',
+  });
 });
 
 // Start listening on port 3000 (0.0.0.0)
